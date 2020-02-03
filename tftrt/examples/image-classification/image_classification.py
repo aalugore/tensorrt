@@ -21,6 +21,7 @@ import logging
 import time
 import pprint
 from functools import partial
+from tensorflow import keras
 import numpy as np
 import tensorflow as tf
 from tensorflow.python.compiler.tensorrt import trt_convert as trt
@@ -74,6 +75,7 @@ def get_preprocess_fn(preprocess_method, input_size, mode='validation'):
       image = tf.image.decode_png(imgdata, channels=3)
     # Use model's preprocessing function
     image = preprocess_fn(image, input_size, input_size)
+    # type of image = <class 'tensorflow.python.framework.ops.Tensor'>
     return image, label
 
   def benchmark_process(path):
@@ -87,6 +89,25 @@ def get_preprocess_fn(preprocess_method, input_size, mode='validation'):
   if mode == 'benchmark':
     return benchmark_process
   raise ValueError("Mode must be either 'validation' or 'benchmark'")
+
+
+
+def get_fashion_mnist_data(batch_size):
+
+    fashion_mnist = keras.datasets.fashion_mnist
+
+    (train_images, train_labels), (test_images,
+                                   test_labels) = fashion_mnist.load_data()
+
+    # Only going to deal with the 'test_images' since the model should already be trained
+
+    # might have to revisit the below in case I get something screwy
+    test_images = test_images.astype(np.float32) / 255.0
+    dataset = tf.data.Dataset.from_tensor_slices((test_images, test_labels))
+    dataset = dataset.batch(batch_size=batch_size)
+    dataset = dataset.repeat(count=1)
+
+    return dataset
 
 
 def get_dataset(data_files,
@@ -110,12 +131,23 @@ def get_dataset(data_files,
         preprocess_method=preprocess_method,
         input_size=input_size,
         mode=mode)
+    print("")
+    print("")
+    print("")
+    print(mode)
+    print("")
+    print("")
+    print("")
+
     if mode == 'validation':
       dataset = tf.data.TFRecordDataset(data_files)
       dataset = dataset.map(map_func=preprocess_fn, num_parallel_calls=8)
       dataset = dataset.batch(batch_size=batch_size)
       dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
       dataset = dataset.repeat(count=1)
+      print("HEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEERE")
+      print(type(dataset))
+      print(dataset)
     elif mode == 'benchmark':
       dataset = tf.data.Dataset.from_tensor_slices(data_files)
       dataset = dataset.map(map_func=preprocess_fn, num_parallel_calls=8)
@@ -123,6 +155,8 @@ def get_dataset(data_files,
       dataset = dataset.repeat(count=1)
     else:
       raise ValueError("Mode must be either 'validation' or 'benchmark'")
+  print("vvvvvvVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV")
+  print(type(dataset))
   return dataset
 
 
@@ -177,6 +211,7 @@ def get_graph_func(input_saved_model_dir,
       converter.convert()
       if optimize_offline:
         print('Building TensorRT engines...')
+        print("ANDYYYYY WE SHOULD NOT SEE THIS!!!!")
         converter.build(input_fn=partial(input_fn, data_files, 1))
       converter.save(output_saved_model_dir=output_saved_model_dir)
       graph_func = get_func_from_saved_model(output_saved_model_dir)
@@ -186,6 +221,7 @@ def get_graph_func(input_saved_model_dir,
           input_fn, calib_files, num_calib_inputs//batch_size))
       if optimize_offline:
         print('Building TensorRT engines...')
+        print("INSTANCE 2 OF WE SHOULD NOT SEE THIS")
         converter.build(input_fn=partial(input_fn, data_files, 1))
       converter.save(output_saved_model_dir=output_saved_model_dir)
       graph_func = get_func_from_saved_model(output_saved_model_dir)
@@ -196,7 +232,7 @@ def eval_fn(preds, labels, adjust):
      Assumes preds and labels are numpy arrays.
   """
   preds = np.argmax(preds, axis=1).reshape(-1) - adjust
-  return np.sum((labels.reshape(-1) == preds).astype(np.float32))
+  return np.sum((labels.reshape(-1) == preds))
 
 def run_inference(graph_func,
                   data_files,
@@ -209,7 +245,8 @@ def run_inference(graph_func,
                   use_synthetic,
                   display_every=100,
                   mode='validation',
-                  target_duration=None):
+                  target_duration=None,
+                  use_fashion_mnist_data=False):
   """Run the given graph_func on the data files provided. In validation mode,
   it consumes TFRecords with labels and reports accuracy. In benchmark mode, it
   times inference on real data (.jpgs).
@@ -219,7 +256,12 @@ def run_inference(graph_func,
   iter_times = []
   adjust = 1 if num_classes == 1001 else 0
   initial_time = time.time()
-  dataset = get_dataset(data_files=data_files,
+
+  if use_fashion_mnist_data:
+    dataset = get_fashion_mnist_data(batch_size=batch_size)
+
+  else:
+    dataset = get_dataset(data_files=data_files,
                         batch_size=batch_size,
                         use_synthetic=use_synthetic,
                         input_size=input_size,
@@ -227,6 +269,10 @@ def run_inference(graph_func,
                         mode=mode)
 
   if mode == 'validation':
+    print("EYE CATCHER")
+    print(type(dataset))
+    print(dataset)
+    print("EYE CATCHER")
     for i, (batch_images, batch_labels) in enumerate(dataset):
       start_time = time.time()
       batch_preds = graph_func(batch_images)[0].numpy()
@@ -240,6 +286,11 @@ def run_inference(graph_func,
       if i > 1 and target_duration is not None and \
         time.time() - initial_time > target_duration:
         break
+
+
+    print("batch_size = %d" % batch_size)
+    print("i = %d" % i)
+    print("corrects = %d" % corrects)
     accuracy = corrects / (batch_size * i)
     results['accuracy'] = accuracy
 
@@ -371,6 +422,8 @@ if __name__ == '__main__':
   parser.add_argument('--target_duration', type=int, default=None,
                       help='If set, script will run for specified'
                       'number of seconds.')
+  parser.add_argument('--use_fashion_mnist_data', action='store_true',
+                      help='If set, script will use Keras fashion_mnist dataset.')
   args = parser.parse_args()
 
   if args.precision != 'FP32' and not args.use_trt:
@@ -390,8 +443,8 @@ if __name__ == '__main__':
         '({} <= {})'.format(args.num_calib_inputs, args.batch_size))
   if args.mode == 'validation' and args.use_synthetic:
     raise ValueError('Cannot use both validation mode and synthetic dataset')
-  if args.data_dir is None and not args.use_synthetic:
-    raise ValueError("--data_dir required if you are not using synthetic data")
+  if args.data_dir is None and not args.use_synthetic and not args.use_fashion_mnist_data:
+    raise ValueError("--data_dir required if you are not using synthetic data or fashion mnist data")
   if args.use_synthetic and args.num_iterations is None:
     raise ValueError("--num_iterations is required for --use_synthetic")
   if args.use_trt and not args.output_saved_model_dir:
@@ -407,7 +460,7 @@ if __name__ == '__main__':
       raise ValueError('Can not find any files in {} with '
                        'pattern "{}"'.format(data_dir, filename_pattern))
     return files
-  if not args.use_synthetic:
+  if not args.use_synthetic and not args.use_fashion_mnist_data:
     if args.mode == "validation":
       data_files = get_files(args.data_dir, 'validation*')
     elif args.mode == "benchmark":
@@ -425,6 +478,7 @@ if __name__ == '__main__':
       args.precision,
       args.minimum_segment_size,
       args.batch_size,)
+
   graph_func, times = get_graph_func(
       input_saved_model_dir=args.input_saved_model_dir,
       output_saved_model_dir=args.output_saved_model_dir,
@@ -447,6 +501,8 @@ if __name__ == '__main__':
   print_dict(dict(params._asdict()))
   print('Conversion times:')
   print_dict(times, postfix='s')
+  if args.use_fashion_mnist_data:
+    print('USING FASHION MNIST DATA')
 
   results = run_inference(graph_func,
                 data_files=data_files,
@@ -459,7 +515,9 @@ if __name__ == '__main__':
                 use_synthetic=args.use_synthetic,
                 display_every=args.display_every,
                 mode=args.mode,
-                target_duration=args.target_duration)
+                target_duration=args.target_duration,
+                use_fashion_mnist_data=args.use_fashion_mnist_data)
+
   if args.mode == 'validation':
     print('  accuracy: %.2f' % (results['accuracy'] * 100))
   print('  images/sec: %d' % results['images_per_sec'])
